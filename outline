@@ -1,0 +1,385 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "typer>=0.12",
+#     "httpx>=0.27",
+#     "rich>=13",
+# ]
+# ///
+"""outline — CLI for self-hosted Outline (https://www.getoutline.com).
+
+Configuration:
+  Host:  set $OUTLINE_HOST or write the URL to ~/.config/outline-cli/host
+  Token: set $OUTLINE_TOKEN or write the token to ~/.config/outline-token
+         (chmod 600 the file; Outline → Settings → API → New Token)
+
+Try:
+  outline doctor                 # check setup + connectivity
+  outline whoami                 # who am I
+  outline ls                     # list collections
+  outline search "lab lifecycle" # search docs
+  outline read <slug>            # render a doc as markdown
+  outline raw collections.list   # call any endpoint
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+from pathlib import Path
+from typing import Annotated, Optional
+
+import httpx
+import typer
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.table import Table
+from rich.tree import Tree
+
+app = typer.Typer(
+    no_args_is_help=True,
+    rich_markup_mode="rich",
+    help="CLI for self-hosted Outline.",
+    add_completion=True,
+)
+
+console = Console()
+err = Console(stderr=True, style="bold red")
+
+CONFIG_DIR = Path.home() / ".config" / "outline-cli"
+HOST_FILE = CONFIG_DIR / "host"
+TOKEN_FILE = Path.home() / ".config" / "outline-token"
+
+
+# ---------------------------------------------------------------------------
+# Config / HTTP plumbing
+# ---------------------------------------------------------------------------
+
+def _read_secret(env_var: str, file_path: Path, name: str) -> str:
+    val = os.environ.get(env_var, "").strip()
+    if val:
+        return val
+    if file_path.exists():
+        return file_path.read_text(encoding="utf-8").strip()
+    err.print(
+        f"Missing {name}.\n"
+        f"  Set ${env_var} or write the value to {file_path}\n"
+        f"  (then [bold]chmod 600 {file_path}[/bold] for safety)"
+    )
+    raise typer.Exit(2)
+
+
+def _host() -> str:
+    return _read_secret("OUTLINE_HOST", HOST_FILE, "Outline host URL").rstrip("/")
+
+
+def _token() -> str:
+    return _read_secret("OUTLINE_TOKEN", TOKEN_FILE, "Outline API token")
+
+
+def _post(endpoint: str, body: dict | None = None) -> dict:
+    body = body or {}
+    url = f"{_host()}/api/{endpoint}"
+    headers = {
+        "Authorization": f"Bearer {_token()}",
+        "Content-Type": "application/json",
+    }
+    try:
+        r = httpx.post(url, headers=headers, json=body, timeout=30.0)
+    except httpx.ConnectError as e:
+        err.print(f"Cannot connect to {_host()}: {e}")
+        raise typer.Exit(1)
+    except httpx.RequestError as e:
+        err.print(f"Request failed: {e}")
+        raise typer.Exit(1)
+
+    if r.status_code == 401:
+        err.print("401 Unauthorized — token invalid or expired. Regenerate at Settings → API.")
+        raise typer.Exit(1)
+    if r.status_code == 404:
+        err.print(f"404 — endpoint '{endpoint}' or referenced resource not found.")
+        raise typer.Exit(1)
+    if r.status_code >= 400:
+        snippet = r.text[:500]
+        err.print(f"HTTP {r.status_code}: {snippet}")
+        raise typer.Exit(1)
+
+    return r.json()
+
+
+def _short(s: str | None, n: int = 8) -> str:
+    return (s or "")[:n]
+
+
+def _doc_of(row: dict) -> dict:
+    """Some endpoints wrap the doc as {document: {...}, ranking: ...}."""
+    return row.get("document", row) if isinstance(row, dict) else {}
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+@app.command()
+def doctor():
+    """Check setup + connectivity."""
+    rows = []
+    # host
+    try:
+        h = _host()
+        rows.append(("host", h, "ok"))
+    except SystemExit:
+        rows.append(("host", "(not set)", "FAIL"))
+        h = None
+    # token
+    try:
+        t = _token()
+        rows.append(("token", "***" + t[-4:] if len(t) > 4 else "(empty)", "ok"))
+    except SystemExit:
+        rows.append(("token", "(not set)", "FAIL"))
+        t = None
+
+    if not (h and t):
+        err.print(
+            "\nSetup:\n"
+            f"  mkdir -p {CONFIG_DIR}\n"
+            f'  echo "https://docs.yourdomain.com" > {HOST_FILE}\n'
+            f"  echo '<paste-token-here>' > {TOKEN_FILE}\n"
+            f"  chmod 600 {TOKEN_FILE}\n"
+        )
+        raise typer.Exit(2)
+
+    # connectivity
+    try:
+        data = _post("auth.info", {})
+        u = data.get("data", {}).get("user", {})
+        rows.append(("connected as", u.get("name", "?"), "ok"))
+        rows.append(("email", u.get("email", "?"), "ok"))
+        team = data.get("data", {}).get("team", {})
+        rows.append(("team", team.get("name", "?"), "ok"))
+    except typer.Exit:
+        rows.append(("connectivity", "(failed)", "FAIL"))
+        raise
+
+    table = Table(show_header=False)
+    for k, v, status in rows:
+        style = "green" if status == "ok" else "red"
+        table.add_row(k, v, f"[{style}]{status}[/{style}]")
+    console.print(table)
+
+
+@app.command()
+def whoami():
+    """Print the auth principal for the current token."""
+    data = _post("auth.info", {})
+    user = data.get("data", {}).get("user", {})
+    team = data.get("data", {}).get("team", {})
+    t = Table(show_header=False)
+    t.add_row("user", user.get("name", "?"))
+    t.add_row("email", user.get("email", "?"))
+    t.add_row("role", user.get("role", "?"))
+    t.add_row("team", team.get("name", "?"))
+    t.add_row("host", _host())
+    console.print(t)
+
+
+@app.command()
+def search(
+    query: Annotated[str, typer.Argument(help="Search query")],
+    limit: Annotated[int, typer.Option("--limit", "-n", help="Max results")] = 10,
+    collection: Annotated[Optional[str], typer.Option("--collection", "-c", help="Restrict to a collection id")] = None,
+):
+    """Full-text search across documents."""
+    body: dict = {"query": query, "limit": limit}
+    if collection:
+        body["collectionId"] = collection
+    data = _post("documents.search", body)
+    rows = data.get("data", [])
+    if not rows:
+        console.print("[dim](no results)[/dim]")
+        return
+    t = Table(show_lines=False)
+    t.add_column("title", style="bold")
+    t.add_column("collection", style="cyan")
+    t.add_column("updated", style="dim")
+    t.add_column("slug / id", style="dim")
+    for r in rows:
+        d = _doc_of(r)
+        slug_or_id = d.get("urlId") or d.get("id", "")
+        t.add_row(
+            d.get("title", "(no title)"),
+            _short(d.get("collectionId", "")),
+            (d.get("updatedAt", "") or "")[:10],
+            slug_or_id,
+        )
+    console.print(t)
+
+
+@app.command()
+def read(
+    slug: Annotated[str, typer.Argument(help="Document id or url-slug")],
+    raw: Annotated[bool, typer.Option("--raw", help="Emit raw markdown to stdout (for piping)")] = False,
+):
+    """Read a document. Rendered markdown by default; --raw for piping."""
+    data = _post("documents.info", {"id": slug})
+    doc = data.get("data") or {}
+    if not doc:
+        err.print("Document not found.")
+        raise typer.Exit(1)
+    text = doc.get("text", "")
+    if raw:
+        sys.stdout.write(text)
+        return
+    console.rule(f"[bold]{doc.get('title', slug)}[/bold]")
+    console.print(Markdown(text))
+
+
+@app.command(name="ls")
+def list_(
+    collection: Annotated[Optional[str], typer.Argument(help="Collection id (omit → list collections)")] = None,
+    limit: Annotated[int, typer.Option("--limit", "-n")] = 25,
+):
+    """List collections, or documents in a collection."""
+    if collection is None:
+        data = _post("collections.list", {"limit": limit})
+        rows = data.get("data", [])
+        t = Table(show_lines=False)
+        t.add_column("name", style="bold")
+        t.add_column("docs", style="cyan", justify="right")
+        t.add_column("id", style="dim")
+        for r in rows:
+            t.add_row(
+                r.get("name", "(no name)"),
+                str(r.get("documentCount", "?")),
+                r.get("id", ""),
+            )
+        console.print(t)
+    else:
+        data = _post("documents.list", {"collectionId": collection, "limit": limit})
+        rows = data.get("data", [])
+        t = Table(show_lines=False)
+        t.add_column("title", style="bold")
+        t.add_column("updatedAt", style="dim")
+        t.add_column("slug / id", style="dim")
+        for r in rows:
+            slug_or_id = r.get("urlId") or r.get("id", "")
+            t.add_row(
+                r.get("title", "(no title)"),
+                (r.get("updatedAt", "") or "")[:10],
+                slug_or_id,
+            )
+        console.print(t)
+
+
+@app.command()
+def tree(
+    collection: Annotated[str, typer.Argument(help="Collection id")],
+):
+    """Recursive tree of documents in a collection."""
+    data = _post("collections.documents", {"id": collection})
+    rows = data.get("data", [])
+    root = Tree(f"[bold cyan]{collection[:8]}[/bold cyan]")
+
+    def walk(parent: Tree, node: dict) -> None:
+        sub = parent.add(node.get("title", "(no title)"))
+        for child in node.get("children", []) or []:
+            walk(sub, child)
+
+    for node in rows:
+        walk(root, node)
+    console.print(root)
+
+
+@app.command()
+def pull(
+    slug: Annotated[str, typer.Argument(help="Document id or slug")],
+    out: Annotated[Optional[Path], typer.Option("--out", "-o", help="Output file (default: stdout)")] = None,
+):
+    """Export a document's markdown to a file or stdout."""
+    data = _post("documents.export", {"id": slug})
+    text = data.get("data", "") or ""
+    if out:
+        out.write_text(text, encoding="utf-8")
+        console.print(f"[green]wrote[/green] {out}  ({len(text)} chars)")
+    else:
+        sys.stdout.write(text)
+
+
+@app.command()
+def grep(
+    pattern: Annotated[str, typer.Argument(help="Regex pattern (case-insensitive)")],
+    limit: Annotated[int, typer.Option("--limit", "-n", help="Max docs to scan from search hits")] = 50,
+):
+    """Search across docs and show matching lines."""
+    rx = re.compile(pattern, re.IGNORECASE)
+    # broad search using a stripped-down query (regex chars confuse the search engine)
+    q = re.sub(r"[^\w\s-]", " ", pattern)[:50].strip() or "."
+    data = _post("documents.search", {"query": q, "limit": limit})
+    hits = data.get("data", [])
+    any_match = False
+    for r in hits:
+        d = _doc_of(r)
+        text = d.get("text", "") or ""
+        title = d.get("title", "?")
+        for i, line in enumerate(text.splitlines(), 1):
+            if rx.search(line):
+                any_match = True
+                console.print(
+                    f"[cyan]{title[:40]:40}[/cyan]:[dim]{i:4}[/dim]: "
+                    f"{line.strip()[:200]}"
+                )
+    if not any_match:
+        console.print("[dim](no matches)[/dim]")
+
+
+@app.command()
+def recent(
+    mine: Annotated[bool, typer.Option("--mine", help="Only docs I've viewed")] = False,
+    limit: Annotated[int, typer.Option("--limit", "-n")] = 20,
+):
+    """Recently updated documents."""
+    if mine:
+        data = _post("documents.viewed", {"limit": limit})
+    else:
+        data = _post("documents.list", {
+            "limit": limit, "sort": "updatedAt", "direction": "DESC",
+        })
+    rows = data.get("data", [])
+    t = Table(show_lines=False)
+    t.add_column("title", style="bold")
+    t.add_column("updatedAt", style="dim")
+    t.add_column("slug / id", style="dim")
+    for r in rows:
+        d = _doc_of(r) if mine else r
+        slug_or_id = d.get("urlId") or d.get("id", "")
+        t.add_row(
+            d.get("title", "(no title)"),
+            (d.get("updatedAt", "") or "")[:16],
+            slug_or_id,
+        )
+    console.print(t)
+
+
+@app.command()
+def raw(
+    endpoint: Annotated[str, typer.Argument(help="e.g. 'collections.list'")],
+    body: Annotated[str, typer.Argument(help="JSON body (default '{}')")] = "{}",
+    pretty: Annotated[bool, typer.Option("--pretty/--no-pretty", help="Pretty-print JSON")] = True,
+):
+    """Call any Outline endpoint with a JSON body — escape hatch for the long tail."""
+    try:
+        b = json.loads(body)
+    except json.JSONDecodeError as e:
+        err.print(f"Invalid JSON body: {e}")
+        raise typer.Exit(2)
+    data = _post(endpoint, b)
+    if pretty:
+        console.print_json(data=data)
+    else:
+        sys.stdout.write(json.dumps(data) + "\n")
+
+
+if __name__ == "__main__":
+    app()
