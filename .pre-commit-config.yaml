@@ -1,0 +1,44 @@
+# Pre-commit hooks for outlinecli.
+# Requires `uv` on PATH (same tool the CLI itself uses).
+#   install: uvx pre-commit install
+#   run all: uvx pre-commit run --all-files
+repos:
+  # Secret-leak prevention — scans staged changes for credentials/tokens.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  # Lint, security (flake8-bandit), and format — via uv so the bare
+  # `outline` file (no .py extension) is picked up from ruff.toml.
+  - repo: local
+    hooks:
+      - id: ruff-lint
+        name: ruff (lint + autofix)
+        entry: uvx ruff check --fix
+        language: system
+        files: ^outline$
+        pass_filenames: true
+
+      - id: ruff-format
+        name: ruff (format)
+        entry: uvx ruff format
+        language: system
+        files: ^outline$
+        pass_filenames: true
+
+      # Static type checking with Astral's `ty`.
+      - id: ty
+        name: ty (type check)
+        entry: scripts/typecheck.sh
+        language: script
+        files: ^outline$
+        pass_filenames: false
+
+      # Dependency CVE audit (deps declared inline in `outline`).
+      - id: pip-audit
+        name: pip-audit (dependency CVEs)
+        entry: scripts/audit-deps.sh
+        language: script
+        files: ^outline$
+        pass_filenames: false
