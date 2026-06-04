@@ -68,12 +68,12 @@ The `raw` escape hatch CAN call destructive endpoints if you point it at them. T
 
 ## Claude Code skill
 
-A [Claude Code](https://claude.com/claude-code) skill ships in [`skills/outline/`](skills/outline/SKILL.md) — it teaches the agent when and how to drive this CLI (search, grep, browse, read/export, raw). Install it by linking the skill dir into your skills folder:
+A [Claude Code](https://claude.com/claude-code) skill ships in [`skills/outline/`](skills/outline/SKILL.md) — it teaches the agent when and how to drive this CLI (search, grep, browse, read/export, raw). Install it the same way as the CLI — one curl, no clone:
 
 ```sh
-ln -s "$(pwd)/skills/outline" ~/.claude/skills/outline
-# or copy if you'd rather not symlink:
-# cp -r skills/outline ~/.claude/skills/outline
+mkdir -p ~/.claude/skills/outline
+curl -fsSL https://raw.githubusercontent.com/naufalafif/outlinecli/main/skills/outline/SKILL.md \
+  -o ~/.claude/skills/outline/SKILL.md
 ```
 
 Then the agent picks it up automatically when you mention Outline or ask it to find/read an internal doc. The skill assumes `outline` is on `PATH` and configured (above).
