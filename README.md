@@ -66,6 +66,18 @@ Every named command only calls read endpoints (`*.list`, `*.info`, `*.search`, `
 
 The `raw` escape hatch CAN call destructive endpoints if you point it at them. The safest belt-and-braces is to **create a read-only token in Outline** — then the server rejects mutations regardless of what you type.
 
+## Claude Code skill
+
+A [Claude Code](https://claude.com/claude-code) skill ships in [`skills/outline/`](skills/outline/SKILL.md) — it teaches the agent when and how to drive this CLI (search, grep, browse, read/export, raw). Install it the same way as the CLI — one curl, no clone:
+
+```sh
+mkdir -p ~/.claude/skills/outline
+curl -fsSL https://raw.githubusercontent.com/naufalafif/outlinecli/main/skills/outline/SKILL.md \
+  -o ~/.claude/skills/outline/SKILL.md
+```
+
+Then the agent picks it up automatically when you mention Outline or ask it to find/read an internal doc. The skill assumes `outline` is on `PATH` and configured (above).
+
 ## Requirements
 
 - Python 3.10+
