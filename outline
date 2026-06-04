@@ -22,6 +22,7 @@ Try:
   outline read <slug>            # render a doc as markdown
   outline raw collections.list   # call any endpoint
 """
+
 from __future__ import annotations
 
 import json
@@ -29,7 +30,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated
 
 import httpx
 import typer
@@ -56,6 +57,7 @@ TOKEN_FILE = Path.home() / ".config" / "outline-token"
 # ---------------------------------------------------------------------------
 # Config / HTTP plumbing
 # ---------------------------------------------------------------------------
+
 
 def _read_secret(env_var: str, file_path: Path, name: str) -> str:
     val = os.environ.get(env_var, "").strip()
@@ -90,13 +92,15 @@ def _post(endpoint: str, body: dict | None = None) -> dict:
         r = httpx.post(url, headers=headers, json=body, timeout=30.0)
     except httpx.ConnectError as e:
         err.print(f"Cannot connect to {_host()}: {e}")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
     except httpx.RequestError as e:
         err.print(f"Request failed: {e}")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
     if r.status_code == 401:
-        err.print("401 Unauthorized — token invalid or expired. Regenerate at Settings → API.")
+        err.print(
+            "401 Unauthorized — token invalid or expired. Regenerate at Settings → API."
+        )
         raise typer.Exit(1)
     if r.status_code == 404:
         err.print(f"404 — endpoint '{endpoint}' or referenced resource not found.")
@@ -121,6 +125,7 @@ def _doc_of(row: dict) -> dict:
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
+
 
 @app.command()
 def doctor():
@@ -189,7 +194,10 @@ def whoami():
 def search(
     query: Annotated[str, typer.Argument(help="Search query")],
     limit: Annotated[int, typer.Option("--limit", "-n", help="Max results")] = 10,
-    collection: Annotated[Optional[str], typer.Option("--collection", "-c", help="Restrict to a collection id")] = None,
+    collection: Annotated[
+        str | None,
+        typer.Option("--collection", "-c", help="Restrict to a collection id"),
+    ] = None,
 ):
     """Full-text search across documents."""
     body: dict = {"query": query, "limit": limit}
@@ -220,7 +228,9 @@ def search(
 @app.command()
 def read(
     slug: Annotated[str, typer.Argument(help="Document id or url-slug")],
-    raw: Annotated[bool, typer.Option("--raw", help="Emit raw markdown to stdout (for piping)")] = False,
+    raw: Annotated[
+        bool, typer.Option("--raw", help="Emit raw markdown to stdout (for piping)")
+    ] = False,
 ):
     """Read a document. Rendered markdown by default; --raw for piping."""
     data = _post("documents.info", {"id": slug})
@@ -238,7 +248,9 @@ def read(
 
 @app.command(name="ls")
 def list_(
-    collection: Annotated[Optional[str], typer.Argument(help="Collection id (omit → list collections)")] = None,
+    collection: Annotated[
+        str | None, typer.Argument(help="Collection id (omit → list collections)")
+    ] = None,
     limit: Annotated[int, typer.Option("--limit", "-n")] = 25,
 ):
     """List collections, or documents in a collection."""
@@ -295,7 +307,9 @@ def tree(
 @app.command()
 def pull(
     slug: Annotated[str, typer.Argument(help="Document id or slug")],
-    out: Annotated[Optional[Path], typer.Option("--out", "-o", help="Output file (default: stdout)")] = None,
+    out: Annotated[
+        Path | None, typer.Option("--out", "-o", help="Output file (default: stdout)")
+    ] = None,
 ):
     """Export a document's markdown to a file or stdout."""
     data = _post("documents.export", {"id": slug})
@@ -310,7 +324,9 @@ def pull(
 @app.command()
 def grep(
     pattern: Annotated[str, typer.Argument(help="Regex pattern (case-insensitive)")],
-    limit: Annotated[int, typer.Option("--limit", "-n", help="Max docs to scan from search hits")] = 50,
+    limit: Annotated[
+        int, typer.Option("--limit", "-n", help="Max docs to scan from search hits")
+    ] = 50,
 ):
     """Search across docs and show matching lines."""
     rx = re.compile(pattern, re.IGNORECASE)
@@ -343,9 +359,14 @@ def recent(
     if mine:
         data = _post("documents.viewed", {"limit": limit})
     else:
-        data = _post("documents.list", {
-            "limit": limit, "sort": "updatedAt", "direction": "DESC",
-        })
+        data = _post(
+            "documents.list",
+            {
+                "limit": limit,
+                "sort": "updatedAt",
+                "direction": "DESC",
+            },
+        )
     rows = data.get("data", [])
     t = Table(show_lines=False)
     t.add_column("title", style="bold")
@@ -366,14 +387,16 @@ def recent(
 def raw(
     endpoint: Annotated[str, typer.Argument(help="e.g. 'collections.list'")],
     body: Annotated[str, typer.Argument(help="JSON body (default '{}')")] = "{}",
-    pretty: Annotated[bool, typer.Option("--pretty/--no-pretty", help="Pretty-print JSON")] = True,
+    pretty: Annotated[
+        bool, typer.Option("--pretty/--no-pretty", help="Pretty-print JSON")
+    ] = True,
 ):
     """Call any Outline endpoint with a JSON body — escape hatch for the long tail."""
     try:
         b = json.loads(body)
     except json.JSONDecodeError as e:
         err.print(f"Invalid JSON body: {e}")
-        raise typer.Exit(2)
+        raise typer.Exit(2) from None
     data = _post(endpoint, b)
     if pretty:
         console.print_json(data=data)
